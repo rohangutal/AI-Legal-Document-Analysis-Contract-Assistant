@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     llm_model: str = "gemini-2.5-flash"
     llm_enabled: bool = True
+    max_agent_iterations: int = Field(default=3, ge=1, le=20)
+    max_evidence_chunks: int = Field(default=10, ge=1, le=100)
+    agent_confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    verification_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    llm_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
+    tracing_enabled: bool = True
+    human_approval_required: bool = False
     upload_dir: str = "./data/uploads"
     max_upload_bytes: int = 25 * 1024 * 1024
 

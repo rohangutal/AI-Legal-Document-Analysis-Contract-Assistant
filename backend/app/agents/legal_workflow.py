@@ -13,6 +13,15 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.retrieval.hybrid import build_citation, hybrid_search
+from app.agents.supervisor import SupervisorAgent
+from app.agents.specialists import (
+    ClauseAnalysisAgent,
+    FinalResponseAgent,
+    ObligationAgent,
+    RetrievalAgent,
+    RiskAnalysisAgent,
+)
+from app.schemas.agents import AgentTask
 from app.services.legal_analysis import extract_clauses
 from app.services.llm import generate_grounded_response
 
@@ -35,11 +44,15 @@ class LegalWorkflowState(TypedDict, total=False):
     evidence_valid: bool
     warnings: list[str]
     answer: str
+    supervisor_plan: dict[str, object]
+    selected_agents: list[str]
+    agent_results: dict[str, dict[str, object]]
 
 
 def build_legal_workflow():
     """Compile the routed legal workflow graph."""
     graph = StateGraph(LegalWorkflowState)
+    graph.add_node("supervisor", supervisor_plan)
     graph.add_node("understand_query", understand_query)
     graph.add_node("retrieve", retrieve)
     graph.add_node("extract_clauses", extract)
@@ -47,7 +60,8 @@ def build_legal_workflow():
     graph.add_node("extract_obligations", extract_obligations)
     graph.add_node("validate_evidence", validate_evidence)
     graph.add_node("generate_response", generate_response)
-    graph.add_edge(START, "understand_query")
+    graph.add_edge(START, "supervisor")
+    graph.add_edge("supervisor", "understand_query")
     graph.add_conditional_edges(
         "understand_query",
         route_task,
@@ -87,12 +101,21 @@ def run_legal_workflow(
     )
 
 
+def supervisor_plan(state: LegalWorkflowState) -> dict[str, object]:
+    """Create an explicit specialist plan before legacy-compatible routing."""
+    task = AgentTask(task_type=str(state.get("task", "question")), query=str(state.get("question", "")))
+    plan = SupervisorAgent().plan(task)
+    return {"supervisor_plan": plan.model_dump(mode="json"), "selected_agents": plan.selected_agents}
+
+
 def understand_query(state: LegalWorkflowState) -> dict[str, object]:
     query = state.get("question", "").strip()
     return {"retrieval_query": query or state.get("task", "legal document analysis")}
 
 
 def route_task(state: LegalWorkflowState) -> str:
+    # Preserve the established graph branches while making the supervisor's
+    # plan available to the execution and tracing layers.
     return "retrieve" if state.get("task") == "question" else "extract"
 
 
@@ -116,7 +139,17 @@ def retrieve(state: LegalWorkflowState) -> dict[str, object]:
         chunks,
         top_k=k,
     )
-    return {"retrieved": results, "citations": [str(item["citation"]) for item in results]}
+    agent_result = RetrievalAgent().run(AgentTask(
+        task_type="question", query=q,
+        input_data={"chunks": chunks, "top_k": k},
+    ))
+    agent_results = dict(state.get("agent_results", {}))
+    agent_results[agent_result.agent_name] = agent_result.model_dump(mode="json")
+    return {
+        "retrieved": results,
+        "citations": [str(item["citation"]) for item in results],
+        "agent_results": agent_results,
+    }
 
 
 def extract(state: LegalWorkflowState) -> dict[str, object]:
@@ -128,7 +161,11 @@ def extract(state: LegalWorkflowState) -> dict[str, object]:
         source = dict(chunk)
         source["citation"] = build_citation(source)
         source_chunks.append(source)
-    return {"clauses": extract_clauses(text), "retrieved": source_chunks}
+    clauses = extract_clauses(text)
+    agent_result = ClauseAnalysisAgent().run(AgentTask(task_type="clause_analysis", input_data={"document_text": text}))
+    agent_results = dict(state.get("agent_results", {}))
+    agent_results[agent_result.agent_name] = agent_result.model_dump(mode="json")
+    return {"clauses": clauses, "retrieved": source_chunks, "agent_results": agent_results}
 
 
 def route_extraction(state: LegalWorkflowState) -> str:
@@ -147,7 +184,10 @@ def analyze_risks(state: LegalWorkflowState) -> dict[str, object]:
         for clause in state.get("clauses", [])
         if clause["risk_level"] != "low"
     ]
-    return {"risks": risks}
+    agent_result = RiskAnalysisAgent().run(AgentTask(task_type="risk", input_data={"clauses": state.get("clauses", [])}))
+    agent_results = dict(state.get("agent_results", {}))
+    agent_results[agent_result.agent_name] = agent_result.model_dump(mode="json")
+    return {"risks": risks, "agent_results": agent_results}
 
 
 def extract_obligations(state: LegalWorkflowState) -> dict[str, object]:
@@ -162,7 +202,10 @@ def extract_obligations(state: LegalWorkflowState) -> dict[str, object]:
                     "requires_clarification": True,
                 }
             )
-    return {"obligations": obligations}
+    agent_result = ObligationAgent().run(AgentTask(task_type="obligation", input_data={"clauses": state.get("clauses", [])}))
+    agent_results = dict(state.get("agent_results", {}))
+    agent_results[agent_result.agent_name] = agent_result.model_dump(mode="json")
+    return {"obligations": obligations, "agent_results": agent_results}
 
 
 def validate_evidence(state: LegalWorkflowState) -> dict[str, object]:
@@ -210,4 +253,8 @@ def generate_response(state: LegalWorkflowState) -> dict[str, object]:
         answer = generate_grounded_response(task=str(task), question=str(state.get("question", "")), evidence=llm_evidence, fallback=fallback)
     if citations and "Sources:" not in answer:
         answer += "\n\nSources:\n" + "\n".join(f"- {citation}" for citation in citations)
-    return {"answer": answer}
+    final_result = FinalResponseAgent().run(AgentTask(task_type=str(task), input_data={"findings": []}))
+    final_result.response = answer
+    agent_results = dict(state.get("agent_results", {}))
+    agent_results[final_result.agent_name] = final_result.model_dump(mode="json")
+    return {"answer": answer, "agent_results": agent_results}

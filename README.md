@@ -132,3 +132,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-local.ps1
 ```
 
 The frontend clears expired or invalid access tokens automatically and returns the user to sign-in. Keep `JWT_SECRET` stable across backend restarts; changing it invalidates all existing sessions.
+
+## GenAI architecture phases
+
+Phase 1 establishes shared structured agent contracts and runtime configuration
+without changing the existing legal workflow API. The contracts live in
+`backend/app/schemas/agents.py` and the common agent interface is in
+`backend/app/agents/base.py`. Phase 2 will introduce supervisor-led routing and
+specialized agents on top of these contracts.
+
+Phase 2 implementation is now underway: the LangGraph starts with a supervisor
+plan, selects the required specialist agents, and records structured agent
+results in workflow state while preserving the existing API response contract.

@@ -19,6 +19,8 @@ def test_question_workflow_retrieves_and_validates_evidence() -> None:
     assert state["evidence_valid"] is True
     assert state["citations"]
     assert "terminate" in state["answer"].lower()
+    assert state["supervisor_plan"]["selected_agents"] == ["retrieval", "final_response"]
+    assert state["agent_results"]["retrieval"]["status"] == "completed"
 
 
 def test_risk_workflow_uses_review_language_and_extracts_risk() -> None:
@@ -31,3 +33,4 @@ def test_risk_workflow_uses_review_language_and_extracts_risk() -> None:
     assert state["risks"][0]["severity"] == "high"
     assert "not legal conclusions" in state["answer"]
     assert state["evidence_valid"] is False
+    assert state["supervisor_plan"]["selected_agents"] == ["retrieval", "clause_analysis", "risk_analysis", "final_response"]
