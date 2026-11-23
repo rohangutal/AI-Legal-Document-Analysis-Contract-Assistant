@@ -4,10 +4,16 @@ export type Contract = {
 };
 export type Risk = { id: string; contract_id: string; title: string; category: string; severity: string; explanation: string; business_impact: string | null; suggested_action: string | null; review_status: string; };
 export type Obligation = { id: string; contract_id: string; responsible_party: string | null; description: string; due_date: string | null; due_date_text: string | null; priority: string; status: string; };
+export type ExtractedClause = { id: string; category: string; title: string | null; text: string; section_number: string | null; page_number: number | null; risk_level: string };
 export type ContractAnalysis = {
   contract_id: string;
+  name?: string;
+  contract_type?: string;
   status: string;
-  clauses: { id: string; category: string; title: string | null; text: string; section_number: string | null; page_number: number | null; risk_level: string }[];
+  summary?: string;
+  effective_date?: string | null;
+  expiration_date?: string | null;
+  clauses: ExtractedClause[];
   risks: Risk[];
   obligations: Obligation[];
 };
@@ -48,6 +54,14 @@ export const api = {
   analyzeContract: (id: string) => request<{ contract_id: string; status: string; clause_count: number; risk_count: number; obligation_count: number }>(`/legal/contracts/${id}/analyze`, { method: 'POST' }),
   analysis: (id: string) => request<ContractAnalysis>(`/legal/contracts/${id}/analysis`),
   risks: (contractId: string) => request<Risk[]>(`/legal/contracts/${contractId}/risks`),
+  allRisks: (filters?: { contract_id?: string; severity?: string; review_status?: string }) => {
+    const params = new URLSearchParams();
+    if (filters?.contract_id) params.set('contract_id', filters.contract_id);
+    if (filters?.severity) params.set('severity', filters.severity);
+    if (filters?.review_status) params.set('review_status', filters.review_status);
+    const qs = params.toString();
+    return request<Risk[]>(`/legal/risks${qs ? `?${qs}` : ''}`);
+  },
   reviewRisk: (riskId: string, status: string) => request<Risk>(`/legal/risks/${riskId}/review`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   obligations: () => request<Obligation[]>('/legal/obligations'),
   updateObligation: (id: string, status: string) => request<Obligation>(`/legal/obligations/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),

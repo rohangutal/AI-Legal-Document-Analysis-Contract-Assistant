@@ -8,6 +8,20 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 
 
+_LEGAL_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "terminat": ("terminat", "expir", "cancel", "breach", "notic", "renew", "end"),
+    "liabil": ("liabil", "indemnif", "damag", "cap", "limit", "exposur", "loss"),
+    "indemnif": ("indemnif", "liabil", "harmless", "defend", "claim", "hold"),
+    "pay": ("pay", "invoic", "fee", "due", "compen", "bill", "charg", "rate"),
+    "payment": ("pay", "invoic", "fee", "due", "compen", "bill", "charg", "rate"),
+    "confidenti": ("confidenti", "disclosur", "secret", "propriet", "nda"),
+    "oblig": ("shall", "must", "requir", "agre", "covenant", "perform"),
+    "summar": ("contract", "agreement", "parti", "scope", "term", "servic", "provid"),
+    "risk": ("liabil", "indemnif", "damag", "breach", "penalti", "unlimit", "exposur"),
+    "disput": ("governing", "law", "jurisdict", "arbitr", "court", "venu"),
+}
+
+
 def hybrid_search(
     query: str,
     chunks: Sequence[Mapping[str, object]],
@@ -28,6 +42,8 @@ def hybrid_search(
     terms = _terms(query)
     filtered = [chunk for chunk in chunks if _matches_filters(chunk, metadata_filters)]
     scored: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+
     for chunk in filtered:
         content = str(chunk.get("content", ""))
         keyword_score = _keyword_score(terms, content)
@@ -38,7 +54,28 @@ def hybrid_search(
             result["score"] = round(score, 6)
             result["citation"] = build_citation(result)
             scored.append(result)
-    return sorted(scored, key=lambda item: (-float(item["score"]), str(item.get("chunk_id", ""))))[:top_k]
+            seen_ids.add(str(result.get("chunk_id", "")))
+
+    scored = sorted(scored, key=lambda item: (-float(item["score"]), str(item.get("chunk_id", ""))))
+
+    # If the user asked a broad or legal query and few/no chunks matched,
+    # supply top representative contract chunks so the Agentic RAG has real context.
+    if len(scored) < min(top_k, len(filtered)):
+        lowered_q = query.lower()
+        is_broad = any(k in lowered_q for k in ("summar", "what", "all", "provid", "contract", "review", "detail", "tell", "explain", "risk", "obligat"))
+        if is_broad or not scored:
+            for chunk in filtered:
+                cid = str(chunk.get("chunk_id", ""))
+                if cid not in seen_ids:
+                    res = dict(chunk)
+                    res["score"] = 0.15
+                    res["citation"] = build_citation(res)
+                    scored.append(res)
+                    seen_ids.add(cid)
+                    if len(scored) >= top_k:
+                        break
+
+    return scored[:top_k]
 
 
 def build_citation(chunk: Mapping[str, object]) -> str:
@@ -49,7 +86,14 @@ def build_citation(chunk: Mapping[str, object]) -> str:
 
 
 def _terms(value: str) -> set[str]:
-    return {_normalize_term(term) for term in re.findall(r"[a-z0-9]{3,}", value.lower())}
+    base_terms = {_normalize_term(term) for term in re.findall(r"[a-z0-9]{3,}", value.lower())}
+    expanded = set(base_terms)
+    for term in base_terms:
+        for prefix, syns in _LEGAL_SYNONYMS.items():
+            if term.startswith(prefix) or prefix.startswith(term):
+                for syn in syns:
+                    expanded.add(_normalize_term(syn))
+    return expanded
 
 
 def _normalize_term(term: str) -> str:

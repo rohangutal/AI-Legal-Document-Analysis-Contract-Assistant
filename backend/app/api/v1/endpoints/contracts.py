@@ -46,8 +46,33 @@ async def upload_contract(
     if len(content) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="File exceeds the configured upload limit")
     content_hash = hashlib.sha256(content).hexdigest()
-    if db.scalar(select(Document).where(Document.content_hash == content_hash)):
-        raise HTTPException(status_code=409, detail="This document has already been uploaded")
+    existing_document = db.scalar(select(Document).where(Document.content_hash == content_hash))
+    if existing_document:
+        contract = db.scalar(
+            select(Contract).where(Contract.document_id == existing_document.id, Contract.created_by_id == user.id)
+        )
+        if not contract:
+            contract = Contract(
+                name=name or Path(filename).stem,
+                contract_type=contract_type or existing_document.contract_type or "General Agreement",
+                document_id=existing_document.id,
+                created_by_id=user.id,
+            )
+            db.add(contract)
+            db.commit()
+            db.refresh(contract)
+        
+        clause_count = db.scalar(
+            select(func.count()).select_from(ExtractedClause).where(ExtractedClause.contract_id == contract.id)
+        ) or 0
+        if clause_count == 0:
+            try:
+                analyze_persisted_contract(db, contract)
+                db.refresh(contract)
+            except Exception:
+                pass
+        return contract
+
     try:
         pages = load_document(filename, content)
         chunks = chunk_legal_document(pages)
@@ -87,6 +112,11 @@ async def upload_contract(
     db.add(contract)
     db.commit()
     db.refresh(contract)
+    try:
+        analyze_persisted_contract(db, contract)
+        db.refresh(contract)
+    except Exception:
+        pass
     return contract
 
 
@@ -110,11 +140,34 @@ def get_contract_analysis(contract_id: UUID, db: Session = Depends(get_db), user
     if contract is None:
         raise HTTPException(status_code=404, detail="Contract not found")
     clauses = list(db.scalars(select(ExtractedClause).where(ExtractedClause.contract_id == contract.id).order_by(ExtractedClause.page_number, ExtractedClause.created_at)))
+    if not clauses and contract.document_id:
+        try:
+            analyze_persisted_contract(db, contract)
+            clauses = list(db.scalars(select(ExtractedClause).where(ExtractedClause.contract_id == contract.id).order_by(ExtractedClause.page_number, ExtractedClause.created_at)))
+        except Exception:
+            pass
+
     risks = list(db.scalars(select(ContractRisk).where(ContractRisk.contract_id == contract.id).order_by(ContractRisk.created_at)))
     obligations = list(db.scalars(select(ContractObligation).where(ContractObligation.contract_id == contract.id).order_by(ContractObligation.due_date, ContractObligation.created_at)))
+    
+    categories = list(dict.fromkeys(c.category for c in clauses))
+    elevated_risks = [r for r in risks if r.severity in ("high", "critical")]
+    
+    summary = (
+        f"This {contract.contract_type} ({contract.name}) contains {len(clauses)} verified clause provisions across "
+        f"{len(categories)} distinct legal categories ({', '.join(categories[:4]) if categories else 'core terms'}). "
+        f"The automated audit identified {len(risks)} risk points ({len(elevated_risks)} high/critical priority) and {len(obligations)} tracked obligations. "
+        "Original source section and page anchors are preserved for human review."
+    )
+
     return {
         "contract_id": str(contract.id),
+        "name": contract.name,
+        "contract_type": contract.contract_type,
         "status": contract.status,
+        "summary": summary,
+        "effective_date": contract.effective_date.isoformat() if contract.effective_date else None,
+        "expiration_date": contract.expiration_date.isoformat() if contract.expiration_date else None,
         "clauses": [{
             "id": str(clause.id),
             "category": clause.category,

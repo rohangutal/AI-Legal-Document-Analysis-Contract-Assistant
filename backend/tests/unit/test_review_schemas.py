@@ -14,3 +14,8 @@ def test_obligation_update_allows_partial_updates() -> None:
     update = ObligationUpdate(status="completed")
 
     assert update.model_dump(exclude_unset=True) == {"status": "completed"}
+
+
+def test_list_all_risks_is_exposed() -> None:
+    from app.api.v1.endpoints.reviews import list_all_risks
+    assert callable(list_all_risks)

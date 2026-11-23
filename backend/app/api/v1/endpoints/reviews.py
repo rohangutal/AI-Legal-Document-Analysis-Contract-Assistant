@@ -34,6 +34,25 @@ def list_contract_risks(contract_id: UUID, db: Session = Depends(get_db), user: 
     return list(db.scalars(select(ContractRisk).where(ContractRisk.contract_id == contract_id).order_by(ContractRisk.created_at)))
 
 
+@router.get("/risks", response_model=list[RiskResponse])
+def list_all_risks(
+    contract_id: UUID | None = None,
+    severity: str | None = None,
+    review_status: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[ContractRisk]:
+    """Return all risks across the current user's contracts, with optional filters."""
+    stmt = select(ContractRisk).join(Contract).where(Contract.created_by_id == user.id)
+    if contract_id:
+        stmt = stmt.where(ContractRisk.contract_id == contract_id)
+    if severity and severity != "all":
+        stmt = stmt.where(ContractRisk.severity == severity)
+    if review_status and review_status != "all":
+        stmt = stmt.where(ContractRisk.review_status == review_status)
+    return list(db.scalars(stmt.order_by(ContractRisk.created_at.desc())))
+
+
 @router.patch("/risks/{risk_id}/review", response_model=RiskResponse)
 def review_risk(risk_id: UUID, request: RiskReviewRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> ContractRisk:
     risk = db.scalar(select(ContractRisk).join(Contract).where(ContractRisk.id == risk_id, Contract.created_by_id == user.id))

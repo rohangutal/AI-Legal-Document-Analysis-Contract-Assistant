@@ -107,10 +107,14 @@ def retrieve(state: LegalWorkflowState) -> dict[str, object]:
             "section_number": None,
             "section_title": None,
         }]
+    q = state.get("retrieval_query", "")
+    q_lower = q.lower()
+    is_broad = any(k in q_lower for k in ("summar", "overview", "what is this", "key term", "parties", "explain", "findings", "provisions", "audit"))
+    k = max(state.get("top_k", 5), 10 if is_broad else 6)
     results = hybrid_search(
-        state.get("retrieval_query", ""),
+        q,
         chunks,
-        top_k=state.get("top_k", 5),
+        top_k=k,
     )
     return {"retrieved": results, "citations": [str(item["citation"]) for item in results]}
 
@@ -171,20 +175,22 @@ def validate_evidence(state: LegalWorkflowState) -> dict[str, object]:
 
 def generate_response(state: LegalWorkflowState) -> dict[str, object]:
     task = state.get("task")
-    citations = state.get("citations", [])
+    citations = list(state.get("citations", []))
     evidence = list(state.get("retrieved", []))
-    llm_evidence = [item for item in evidence if item.get("citation")]
-    if not evidence:
+    if not evidence and state.get("clauses"):
         evidence = [
-            {"content": clause.get("text", ""), "citation": f"Source clause {index + 1}"}
+            {"content": clause.get("text", ""), "citation": f"Source clause {index + 1}", "clause_category": clause.get("clause_type")}
             for index, clause in enumerate(state.get("clauses", []))
         ]
+        if not citations:
+            citations = [item["citation"] for item in evidence]
+    llm_evidence = [item for item in evidence if item.get("citation")] or evidence
     if task == "question":
-        if not state.get("retrieved"):
-            answer = "Insufficient source evidence was retrieved to answer this question."
+        if not evidence:
+            answer = "Insufficient source evidence was retrieved to answer this question. Please ensure contract clauses are available."
         else:
-            evidence = "\n".join(f"- {item['content']} ({item['citation']})" for item in state["retrieved"])
-            fallback = f"Relevant contractual evidence:\n{evidence}"
+            evidence_str = "\n".join(f"- {item.get('content', '')} ({item.get('citation', '')})" for item in evidence)
+            fallback = f"Relevant contractual evidence:\n{evidence_str}"
             answer = generate_grounded_response(
                 task=str(task),
                 question=str(state.get("question", "")),
@@ -194,12 +200,14 @@ def generate_response(state: LegalWorkflowState) -> dict[str, object]:
     elif task == "risk":
         fallback = f"Potential risks identified: {len(state.get('risks', []))}. These are review flags, not legal conclusions."
         answer = generate_grounded_response(task=str(task), question=str(state.get("question", "")), evidence=llm_evidence, fallback=fallback)
+        if "not legal conclusions" not in answer:
+            answer += "\n\nNote: These identified items are review flags, not legal conclusions."
     elif task == "obligation":
         fallback = f"Potential obligations identified: {len(state.get('obligations', []))}. Relative or unclear dates require clarification."
         answer = generate_grounded_response(task=str(task), question=str(state.get("question", "")), evidence=llm_evidence, fallback=fallback)
     else:
         fallback = f"The document was divided into {len(state.get('clauses', []))} analyzed clause blocks."
         answer = generate_grounded_response(task=str(task), question=str(state.get("question", "")), evidence=llm_evidence, fallback=fallback)
-    if citations:
+    if citations and "Sources:" not in answer:
         answer += "\n\nSources:\n" + "\n".join(f"- {citation}" for citation in citations)
     return {"answer": answer}
